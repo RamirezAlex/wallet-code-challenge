@@ -25,4 +25,12 @@ router.post(
   authController.login
 );
 
+// Add these new routes to your existing routes
+router.get('/nonce/:address', authController.getNonce);
+router.post('/verify-wallet', authController.verifyWallet);
+router.post('/signup-wallet', [
+  check('username').not().isEmpty().withMessage('Username is required'),
+  check('email').isEmail().withMessage('Invalid email'),
+], authController.signupWallet);
+
 module.exports = router;

@@ -3,6 +3,8 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const { validationResult } = require('express-validator');
+const crypto = require('crypto');
+const { verifyMessage } = require('ethers');
 
 exports.signup = async (req, res) => {
   try {
@@ -83,6 +85,135 @@ exports.login = async (req, res) => {
     res.json({ token, userId: user._id, role: user.role });
   } catch (error) {
     console.error('Error logging in:', error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+};
+
+exports.getNonce = async (req, res) => {
+  try {
+    const { address } = req.params;
+    const nonce = crypto.randomBytes(32).toString('hex');
+    
+    // Only store the nonce and wallet address temporarily
+    let nonceDoc = await User.findOne({ walletAddress: address });
+    if (!nonceDoc) {
+      nonceDoc = new User({
+        walletAddress: address,
+        nonce,
+        username: 'temp', // Will be updated during signup
+        email: 'temp@temp.com' // Will be updated during signup
+      });
+    } else {
+      nonceDoc.nonce = nonce;
+    }
+    await nonceDoc.save();
+    
+    res.json({ nonce });
+  } catch (error) {
+    console.error('Error generating nonce:', error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+};
+
+exports.verifyWallet = async (req, res) => {
+  try {
+    const { address, signature, email, role } = req.body;
+    
+    // Find user by wallet address, email AND role
+    const user = await User.findOne({ 
+      walletAddress: address,
+      email,
+      role
+    });
+    
+    if (!user) {
+      return res.status(404).json({ error: `No account found for this ${role} with the provided wallet address and email` });
+    }
+
+    // Verify signature
+    const signerAddress = verifyMessage(user.nonce, signature);
+    if (signerAddress.toLowerCase() !== address.toLowerCase()) {
+      return res.status(401).json({ error: 'Invalid signature' });
+    }
+
+    // Generate new nonce for next login
+    user.nonce = crypto.randomBytes(32).toString('hex');
+    await user.save();
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { userId: user._id, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+
+    res.json({ token, userId: user._id, role: user.role });
+  } catch (error) {
+    console.error('Error verifying wallet:', error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+};
+
+exports.signupWallet = async (req, res) => {
+  try {
+    const { address, signature, username, email, role } = req.body;
+    
+    // Validate email and username
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    // First verify the signature
+    const tempUser = await User.findOne({ walletAddress: address });
+    if (!tempUser) {
+      return res.status(404).json({ error: 'No nonce found for this address' });
+    }
+
+    // Verify signature
+    const signerAddress = verifyMessage(tempUser.nonce, signature);
+    if (signerAddress.toLowerCase() !== address.toLowerCase()) {
+      return res.status(401).json({ error: 'Invalid signature' });
+    }
+
+    // Check if user exists with same email/wallet AND same role
+    const existingUser = await User.findOne({
+      $and: [
+        { username: { $ne: 'temp' } },
+        { role },
+        {
+          $or: [
+            { email },
+            { walletAddress: address }
+          ]
+        }
+      ]
+    });
+
+    if (existingUser) {
+      return res.status(400).json({ 
+        error: `You are already registered as a ${role}` 
+      });
+    }
+
+    // Update the temporary user with the real data
+    tempUser.username = username;
+    tempUser.email = email;
+    tempUser.role = role;
+    tempUser.nonce = crypto.randomBytes(32).toString('hex'); // New nonce for next login
+
+    await tempUser.save();
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { userId: tempUser._id, role: tempUser.role },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+
+    res.json({ token, userId: tempUser._id, role: tempUser.role });
+  } catch (error) {
+    console.error('Error in wallet signup:', error);
     res.status(500).json({ error: 'Internal Server Error' });
   }
 };
